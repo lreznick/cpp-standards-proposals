@@ -190,11 +190,13 @@ main()
 	MyLib::MyObject2 o2;
 	MyLib::MyObject3 o3;
 	MyLib::MyObject4 o4;
+	MyLib::Example e;
 	f( o0 );
 	f( o1 );
 	f( o2 );
 	f( o3 );
 	f( o4 );
+	f( e );
 
 
 	{

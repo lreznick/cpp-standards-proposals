@@ -33,7 +33,7 @@ and examples, but correcting some errors.  Finally, we'll anticipate common ques
 Overload Resolution is Insufficient
 -----------------------------------
 
-In Rapperswil, 2018, P0782R1 was discussed, in EWG.  Our simple example regarding a potentially unanticipated
+At Rapperswil, 2018, P0782R1 was discussed, in EWG.  Our simple example regarding a potentially unanticipated
 overload to a function found by ADL was discussed in detail.  As discussed in earlier papers and meetings, our
 problem is not with ADL per-se, but rather with the fact that "constrained functions" are only constrained
 in the sense that callers cannot inappropriately call them, but not that these functions are actually
