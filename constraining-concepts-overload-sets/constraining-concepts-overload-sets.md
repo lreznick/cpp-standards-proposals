@@ -461,6 +461,83 @@ This brings us to the last new keyword and mechanism, concept transformers, or c
 (incredibly ugly) keyword we introduce for this is `using this typename< ... > for concept return`.  We'll
 outline a use of it:
 
+```
+template< typename T >
+const T &
+identity( const T &t )
+  using this typename< decltype for concept( t ) > for concept return
+{
+    return t;
+}
+```
+
+This new keyword does NOT affect the meaning of this function itself.  It is not part of the function's
+type.  It is not part of the function's definition.  Leaving it off in some TUs will not cause an ODR
+violation within the definition of `identity`.  It is, insetead, a kind of compiler hint for callers
+of this function.  This new constraint replacer syntax shouldn't be left off of the `identity` function
+as the constraint replacer syntax affects how callers will call this function... which that will lead to
+ODR violations.  This distinction will become important.
+
+As this decoration does not affect the definition of `identity`, but instead affects the callers, what exactly
+does it mean then?  Let's assume that the above `identity` is `std::identity`.  In that case, the following
+expression:
+
+```
+std::identity( constrainedVariable )
+```
+
+can be interpretted almost as if it were rewritten to be:
+```
+concept_cast< decltype for concept( constrainedVariable ) & >( std::identity( constrainedVariable ) )
+```
+
+The only major difference is that in expressions which return r-values, the implicit `concept_cast` does
+not interfere with lifetime extension, whereas an explicit invocation would.
+
+In other words, an implicit `concept_cast` is invoked on the results of the `identity` function and the
+concept given in the `< ... >` of the `using this typename for concept return` constraint replacer is plugged
+into that `concept_cast`.  With this primitive, we can imagine decorating the ENTIRE STL and all other
+codebases with constraint replacers.  Since the constraint replacer syntax is also not directly tied to
+a template declaration, it may be placed on non-template functions as well, with the same effect:
+
+```
+int identity( int x ) using this typename< decltype for concept( x ) > for concept return { return x; }
+```
+
+And concept-based constrained callers to this non-templated `identity` will find that constraints are
+preserved across this call.  This generalized solution can be adapted for multiple argument functions,
+and the `< ... >` syntax should permit the specification of arbitrary compiletime metaprograms to determine
+what concept is returned.  In our estimation, however, most such metaprograms will be "concept identity" of
+some parameter or another, or possibly "concept union" of all parameters.
+
+This last mechanism permits, when proper constraint replacers are written for functions like `std::identity`,
+a preferred interpretation of our first problematic case:
+
+___Shortcoming 1 Code___
+```
+    // The problematic variation now is actually just fine!
+    for( const S &s: container ) fire( std::identity( s ) );
+
+    // What the above actually expands to, in an almost as-if, fashion.
+    for( const S &s: container )
+    {
+
+        fire( concept_cast< decltype for concept( s ) >( std::identity( s ) ) );
+    }
+    
+```
+
+Where the `concept_cast` was implicitly injected because of the constraint replacer which was defined as
+part of `std::identity`'s signature.
+
+If we imagine such a world, where every function has been given an appropriate constraint replacer then all
+transitive function calls, such as `f( std::identity( x ) )` will have the constraint replaced after it was
+lost.  However, boiling the oceans to arrive at such a world would be a big problem...  If only there were
+a way to get there sooner?
+
+Implied Constraint Replacement
+------------------------------
+
 
 
 Simple Motivating Example
@@ -1034,16 +1111,15 @@ SF: 11 - F: 12 - N: 6 - A: 0 - SA: 0
 Acknowledgements
 ----------------
 
-The authors would like to thank Allan Deutsch, Hal Finkel, Lisa Lippincott, Gabriel Dos Reis, Justin McHugh,
-Herb Sutter, Faisal Vali, and numerous others for their research, support, input, review, and guidance
-throughout the lifetime of this proposal.  Without their assistance this would not have been possible.
+The authors would like to thank Nathan Myers, Allan Deutsch, Hal Finkel, Lisa Lippincott, Gabriel Dos Reis, Justin McHugh, Herb Sutter, Faisal Vali, and numerous others for their research, support, input, review, and
+guidance throughout the lifetime of this proposal.  Without their assistance this would not have been possible.
 
 References
 ----------
 
-P0726R0 - "Does Concepts Improve on C++17?"
-P1079R0 - "A minimal solution to the concepts syntax problems"
-P0745R1 - "Concepts in-place syntax"
-P1013R0 - "Explicit concept expressions"
-P1086R0 - "Natural Syntax: Keep It Simple"
-P1084R0 - "Today's return-type-requirements Are Insufficient"
+<p>P0726R0 - "Does Concepts Improve on C++17?"
+<p>P1079R0 - "A minimal solution to the concepts syntax problems"
+<p>P0745R1 - "Concepts in-place syntax"
+<p>P1013R0 - "Explicit concept expressions"
+<p>P1086R0 - "Natural Syntax: Keep It Simple"
+<p>P1084R0 - "Today's return-type-requirements Are Insufficient"
