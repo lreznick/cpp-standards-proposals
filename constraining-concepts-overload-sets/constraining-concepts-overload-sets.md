@@ -152,7 +152,9 @@ into the type being constrained when passing it down to lower function templates
 into the lower function's instantiation for use therein, and then we mangle the names of those function
 templates in order to encode the fact that that implementation may differ from any other differently
 constrained instantiation or an unconstrained instantiation.  This seems tenable at first glance, but it tends
-to have some very surprising effects.  Consider the following function template:
+to have some very surprising effects.
+
+Consider the following function template:
 `void add_last_one( T, U );`.  Although we wouldn't be making `T` or `U` into a box, both `T` and `U` were
 `std::list< ... >` and we passed a `U` which was a constrained `std::list< ... >`, wherein, perhaps, the
 `.back` operation is const-only, we start to get into some very problematic territory.  The problem is when
@@ -162,12 +164,18 @@ different behavior at worst.  Now imagine that this function `add_last_one` is a
 of a templated container.  Now that container's entire operation varies based upon constraints to its member
 functions.  Eventually we wind up with multiple implementations of critical member functions which differ
 in the operations they do, which could seriously jeopardize the integrity of the memory layout.  It's almost
-as-if two different type implementations were fighting over the same memory.  This mightn't be a problem
-if memory layout were identical under all variations, but note that `std::vector< bool >` is a totally
-different layout to `std::vector< struct_containing_a_single_bool >`.  Thus we have sort of re-invented the
-concept map, just raised it up to a higher level -- push the concept map out to the broadest instantiated type
-using it.  This also eventually means that deep copy-in and deep copy-out semantics might become necessary as
-the instantiated outer types don't agree on layout, and forcing them to agree can.
+as-if two different type implementations were fighting over the same memory.
+
+This mightn't be a problem if memory layout were identical under all variations, but note that
+`std::vector< bool >` is a totally different layout to `std::vector< struct_containing_a_single_bool >`.
+Further consider that `add_last_one` might be a critical low-level library function such as `uninitialized_copy`
+or `std::copy` used in the implementation of `std::vector< ... >::reserve`.  In order to prevent two different
+implementations of `::reserve` working on the same `std::vector< ... >` memory, it would become necessary to
+divorce their implementations all the way up to the highest, outermost template.  Thus we have sort of
+re-invented the concept map, just raised it up to a higher level -- push the concept map out to the broadest
+instantiated type using it.  This also eventually means that deep copy-in and deep copy-out semantics would
+become necessary as the instantiated outer types can't be guaranteed to agree on layout and invariants, and
+forcing them to agree can lead to all sorts of problems..
 
 Maybe it mightn't be so bad if we could limit the depth of constraint propagation to only a single, or a few
 levels.  However, the same ugly problems of ODR violations and layout battles still await us here -- a
@@ -177,12 +185,13 @@ author to know how deep in a call hierarchy of templates a function is instantia
 option.  And trying to make the compiler solve for some stable expansion which doesn't change meaning runs
 into the halting problem.
 
-All of these problems arise from putting constraint information into the type system.  The problem is that
+All of these problems arise from putting constraint information into the type system or plumbing it down through
+function implementations which eventually necessitate putting it into the type system.  The problem is that
 putting things into the type system is kind of an all-or-nothing proposition -- either information is
 completely embedded therein, or it is completely absent.
 
-Maybe the type system is the wrong place to put this kind of compiletime metadata.
-
+Maybe the type system is the wrong place to put this kind of compiletime metadata.  But where else might
+we put it?
 
 Keep It Out of the Type System!
 -------------------------------
@@ -192,15 +201,21 @@ What kinds of compromises might we have to make?  If it's not in the type system
 
 Obviously, the benefit of keeping it out of the type system is to avoid the problems that we outlined in
 our section "The Problem of Preserving Concept Metadata at Compiletime".  However, the problem goes deeper
-than just keeping it out of the type system -- we can't preserve any of it.  If we preserved constraint
-information into deeper template instantiations we'd merely reintroduce the divergent implementations problem
-(ODR issue) and then either try to solve it with name mangling (basically the type system) or by just
-hoping that it's not a big problem (which it certainly will be a big problem for someone!)
+than just keeping it out of the type system -- we can't preserve any of it beyond immediate use at a call
+site.  If we preserved constraint information into deeper template instantiations we'd merely reintroduce
+the divergent implementations problem (ODR issue) and then either try to solve it with name mangling (basically
+the type system) or by just hoping that it's not a big problem (which it certainly will be a big problem for
+someone!)
 
 Of course losing the concept information is what we were trying to prevent, so how do we preserve type
 information while not preserving it?  We don't!  We instead rely upon reintroducing it at various points
-in expression checking.  Our solution relies upon introducing a few new keywords to the language, with
-some mostly heretofore-unseen semantics and a few implicit applications of those new grammatical productions.
+in expression checking.  In other words, we accept and embrace the fact that constraint information evaporates
+across any function call, but we find ways of reacquiring it from contextual clues, hints to the compiler,
+definitions of concepts, and declarations of functions.  Our solution relies upon introducing a few new
+keywords to the language, with some mostly heretofore-unseen semantics and then defining a few implicit
+injections of those new grammatical productions.  This tactic to reintroduce the constraint information
+preserves single compilation of lower-level functions, and it prevents the explosion of types and mangling
+that is necessary when recompiling lower-level functions.
 
 The end result, we believe, is a reasonable compromise position.  The resulting syntax for users wishing
 to preserve constraint information will be nearly the same, if not the same, in most cases.
@@ -219,6 +234,9 @@ __Variation 1__:
 
 ```
 
+It is pretty evident that our revised solution delivers the expected clarity of expression for transitivity
+of concept information across function calls, if this problematic case isn't even a problem anymore.
+
 __Variation 2__:
 ```
     // The problematic variation:
@@ -229,13 +247,17 @@ __Variation 2__:
     }
 
     // Which under our expanded proposal might not need to change, depending upon some direction
-    // but in the worst case would become:
+    // from the committee, but it would become, in the worst case:
     for( const S &element: container )
     {
-        const __new_keyword__ &s= element;
+        const __new_keyword_like_auto__ &s= element;
         fire( s );
     }
 ```
+
+The addition of a new keyword, similar to `auto` for use in constraint propagation certainly bodes well
+for the expressivity, and the possibility to even use `auto` itself for this case is appealing.  Clearly
+our solution makes most forms of constraint reintroduction nearly painless to use.
 
 __Variation 3__:
 ```
@@ -243,20 +265,22 @@ __Variation 3__:
     std::for_each( begin( container ), end( container ),
             []( const auto &s ){ fire( s ); } );
 
-    // This kind of rewrite would be possible under our solution (which was also a requirement of the
-    // earlier solution):
+    // This kind of rewrite would be possible under our solution (which was also a possibility in the
+    // earlier overload-resolution-only solution):
     std::for_each( begin( container ), end( container ),
             []( const Concept &s ){ fire( s ); } );
 
-    // Or, another possible rewrite:
+    // Or, another possible rewrite (assuming `container` is something like `std::vector< Concept >`):
     std::for_each( begin( container ), end( container ),
             []( const __new_keyword_like_decltype__( container.front() ) &s ){ fire( s ); } );
 ```
 
-
 The solution to the third shortcoming is the most disappointing, as preserving the concept through
-`std::for_each` for consumption by `auto` was strongly desired by both the committee and us.  We will justify
-in our conclusions why we're not as disappointed as we might have been, however.
+`std::for_each` for consumption by `auto` was strongly desired by both the committee and by the authors.
+We will justify in our conclusions why we're not as disappointed as we might have been, however.
+Additionally, we have some potential future directions of exploration that may make the original syntax
+possible again in some circumstances.
+
 
 How to Reinvent Lost Concept Constraints
 ----------------------------------------
@@ -265,11 +289,21 @@ In order to make it easier to understand this new battery of features, we will i
 order, and build each from earlier primitives, using "as-if" and "almost as-if" explanations of their meanings.
 Most new "keywords" we will introduce are actually sequences of existing keywords chosen to convey a meaning
 and also to be ugly.  We don't particularly care the final result of the naming debate on these new keywords,
-just that they exist with the semantics we will describe below.
+just that facilities exist with the semantics we will describe below, under some names.
 
-We will start with a new kind of cast, `concept_cast`.  Unlike the rest of the new "keywords" we will introduce
-we feel that this particular one is uncontroversial and shouldn't spark much naming debate, thus we've proposed
-a reasonable name.  It should be, hopefully, fairly self-evident what it does, but this is how we define it:
+In the process of this exploration, we will have to make our examples look worse, before they get better.
+The introduction of all of this new machinery permits rewriting the problematic expressions in terms
+of this new machinery, so as to replace the constraint information.  Then, a later section will introduce
+a number of implicit ways to deduce the need for and the correct generation of this machinery.  After
+exploring the implicit deduction of the machinery, we shall see how the expanded examples can have their
+explicit use of this new syntax removed and wind up with code that is usually the same as the code in
+a problematic example which actually works.  (Essentially we are defining tools we can use to explain
+how to make those examples work.)
+
+First, we will start with a new kind of cast, `concept_cast`.  Unlike the rest of the new "keywords" we will
+introduce we feel that this particular one is uncontroversial and shouldn't spark much naming debate, thus
+we've proposed a reasonable name.  It should be, hopefully, fairly self-evident what it does, but this is how
+we define it:
 
 ```
 concept_cast< const Concept & >( someVariable )
@@ -282,7 +316,7 @@ Would be almost as-if the following code were written, instead:
 ```
 
 In other words, `concept_cast` is a cast which statically checks for concept candidacy and asserts this of
-the result.  It is not used to lie about something being a model of a concept, unlike other casts like
+the result.  It is not used to lie about something being a model of a concept, unlike other casts such as
 `reinterpret_cast`.
 
 Now with this primitive, we can start to explore some potential solutions to some of the problems we have,
@@ -423,14 +457,14 @@ should be unconstrained.  If `std::for_each` were something like `std::transform
 deduce `Copyable` for instance, and would probably cause compile failures when functions that are not
 part of the `Copyable` interface are called.  Basically `auto for concept` on a lambda will either deduce
 a potentially more constrained concept than the one used by the function in which the lambda is defined, or it
-will cause a compile failure as `auto for concept` is ill formed when there is no concept data to propagate.
-We also suggest that a Quality of Implementation concern could be to provide compiler warnings for
-unconstrained polymorphic lambdas which are defined in constrained functions.  With all of these points covered,
-this is about as far as we can reclaim the territory of reinventing concept information for lambdas which are
-passed to lower functions.  Either one explicitly specifies the constraint (possibly using
-`decltype for concept`), or one asks for `auto for concept` and is content with a more constrained concept
-or a compile failure.  Pushing the concept information down into the template becomes a major nightmare, as
-discussed in earlier sections.
+will cause a compile failure as `auto for concept` is ill formed when there is no concept data to propagate in
+from the immediate calling site.  We also suggest that a Quality of Implementation concern could be to provide
+compiler warnings for unconstrained polymorphic lambdas which are defined in constrained functions.  With all
+of these points covered, this is about as far as we can reclaim the territory of reinventing concept
+information for lambdas which are passed to lower functions.  Either one explicitly specifies the constraint
+(possibly using `decltype for concept`), or one asks for `auto for concept` and is content with a more
+constrained concept or a compile failure.  Pushing the concept information down into the template for the
+general case becomes a major nightmare, as discussed in earlier sections.
 
 Returning to the composition of functions case, such as `std::identity`, we see that thus far, we haven't
 delivered on the promise to make that code clean (let alone make it so easy to use that it's invisible).
@@ -474,9 +508,11 @@ identity( const T &t )
 This new keyword does NOT affect the meaning of this function itself.  It is not part of the function's
 type.  It is not part of the function's definition.  Leaving it off in some TUs will not cause an ODR
 violation within the definition of `identity`.  It is, insetead, a kind of compiler hint for callers
-of this function.  This new constraint replacer syntax shouldn't be left off of the `identity` function
-as the constraint replacer syntax affects how callers will call this function... which that will lead to
-ODR violations.  This distinction will become important.
+of this function.  Despite the fact that disagreement over the presence of this this new constraint replacer
+syntax isn't an ODR violation, it shouldn't be left off of functions like the `identity` function
+as the constraint replacer syntax affects how callers will call this function... and that will lead to
+ODR violations.  This distinction between affecting the definition and affecting the caller will become
+extremely important.
 
 As this decoration does not affect the definition of `identity`, but instead affects the callers, what exactly
 does it mean then?  Let's assume that the above `identity` is `std::identity`.  In that case, the following
@@ -498,13 +534,13 @@ In other words, an implicit `concept_cast` is invoked on the results of the `ide
 concept given in the `< ... >` of the `using this typename for concept return` constraint replacer is plugged
 into that `concept_cast`.  With this primitive, we can imagine decorating the ENTIRE STL and all other
 codebases with constraint replacers.  Since the constraint replacer syntax is also not directly tied to
-a template declaration, it may be placed on non-template functions as well, with the same effect:
+a template declaration, it may be placed on non-template functions as well, with the same effect.  For example:
 
 ```
 int identity( int x ) using this typename< decltype for concept( x ) > for concept return { return x; }
 ```
 
-And concept-based constrained callers to this non-templated `identity` will find that constraints are
+Now concept-based constrained callers to this non-templated `identity` will find that constraints are
 preserved across this call.  This generalized solution can be adapted for multiple argument functions,
 and the `< ... >` syntax should permit the specification of arbitrary compiletime metaprograms to determine
 what concept is returned.  In our estimation, however, most such metaprograms will be "concept identity" of
@@ -541,7 +577,7 @@ The problem of asking everyone to stop the world and add constraint replacers se
 is actually a major path forward here -- we can infer the need for and definitions of constraint replacers
 in many circumstances.
 
-###From Concept Definitions
+### From Concept Definitions
 
 
 The simplest case to infer a constraint replacer is by looking at the definition of a concept.  Consider:
@@ -559,7 +595,7 @@ should have an implicit `concept_cast< StringLike & >( instance.toString() )` wr
 specifically, we can imply the existence of `using this typename< StringLike > for concept return` as a
 constraint replacer on the `toString()` function.
 
-###From Class Template Members
+### From Class Template Members
 
 Another simple case where we can infer a constraint is on members of templatized classes.  Consider:
 
@@ -580,7 +616,7 @@ Without rewriting this code at all, it is almost certainly safe to imply that
 `using this typename< decltype for concept( T ) > for concept return`.  This permits most template libraries
 to automatically work as-if they were designed for this all along.
 
-###From Function Templates Which Explicitly Return Concepts
+### From Function Templates Which Explicitly Return Concepts
 
 When new functions will be written that use "natural" syntax for concepts, we will have more constraint
 information available to work with.  Consider a modern max function:
@@ -596,7 +632,7 @@ max( LessThanComparableValue a, LessThanComparableValue b )
 We should obviously imply the existence of at least
 `using this typename< LessThanComparableValue > for concept return` as a concept returner.
 
-###From Function Template Arguments
+### From Function Template Arguments
 
 Many function templates are probably discriminators or combinators over the same concept.  This means that we
 could probably infer them from the function signatures.  Consider a legacy max function:
@@ -623,7 +659,7 @@ it will greatly ease the burden on existing library maintainers.  We see this si
 implicit deduction guides.  We need to pick the right answer, and then the libraries mostly will benefit
 from the implicit guides' correct behavior.
 
-###From Non-Template Function Arguments
+### From Non-Template Function Arguments
 
 Some template functions have non-template overloads that invisibly participate in the same overload set.
 Consider:
