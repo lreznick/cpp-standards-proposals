@@ -1,7 +1,7 @@
 Constraining Concepts Overload Sets
 ===================================
 
-ISO/IEC JTC1 SC22 WG21 P0782D2
+ISO/IEC JTC1 SC22 WG21 P0782R2
 
     ADAM David Alan Martin  (adam@recursive.engineer)
     Erich Keane             (erich.keane@intel.com)
@@ -263,12 +263,204 @@ How to Reinvent Lost Concept Constraints
 
 In order to make it easier to understand this new battery of features, we will introduce them in a specific
 order, and build each from earlier primitives, using "as-if" and "almost as-if" explanations of their meanings.
+Most new "keywords" we will introduce are actually sequences of existing keywords chosen to convey a meaning
+and also to be ugly.  We don't particularly care the final result of the naming debate on these new keywords,
+just that they exist with the semantics we will describe below.
 
-We will start with a new kind of cast, `concept_cast`.  It should be, hopefully, fairly self-evident what
-it does, but this is how we define it:
+We will start with a new kind of cast, `concept_cast`.  Unlike the rest of the new "keywords" we will introduce
+we feel that this particular one is uncontroversial and shouldn't spark much naming debate, thus we've proposed
+a reasonable name.  It should be, hopefully, fairly self-evident what it does, but this is how we define it:
 
 ```
-concept_
+concept_cast< const Concept & >( someVariable )
+```
+
+Would be almost as-if the following code were written, instead:
+
+```
+[&]() -> const Concept & { return []( const Concept &c ){ return c }( someVariable ); }()
+```
+
+In other words, `concept_cast` is a cast which statically checks for concept candidacy and asserts this of
+the result.  It is not used to lie about something being a model of a concept, unlike other casts like
+`reinterpret_cast`.
+
+Now with this primitive, we can start to explore some potential solutions to some of the problems we have,
+especially the transitivity (shortcoming 1) problem:
+
+___Shortcoming 1 Code___
+```
+    // The problematic variation:
+    for( const S &s: container ) fire( std::identity( s ) );
+
+    // How we might use `concept_cast` to fix it:
+    for( const S &s: container )
+    {
+        fire( concept_cast< const S & >( std::identity( s ) ) );
+    }
+```
+
+Well, clearly `concept_cast` hasn't made the situation any better in terms of syntax, but it does provide
+a mechanism to force the compiler to reanalyze whether a value matches a concept.  We will need to go further,
+but it is worth pointing out that this `concept_cast` has some semantic overlap with a few of the proposals
+that ask for concept-deduced `auto` and similar things.
+
+Using `concept_cast` we can go further and introduce a new keyword `decltype for concept`.  Hopefully its
+meaning is mostly self-evident.  This keyword is used thus:
+
+```
+concept_cast< decltype for concept( someConstrainedVariable ) & >( unconstrainedExpression );
+```
+
+Semantically, it is a type deduction keyword which gets the concept name for a constrained variable and
+lets it be used in contexts such as:
+
+```
+decltype for concept( someConstrainedVariable ) &reference= someConstrainedVariable;
+```
+
+This lets us start preserving concept information, albeit manually, in local variables.  This is also somewhat
+related to concept-deducing proposals that already exist.  We welcome these proposals and have no preference
+on their syntax, just that the above to capabilities, `decltype for concept` and `concept_cast` are also
+provided under some name or another.  With this new keyword, `decltype for concept` we can rewrite our
+second problematic example to not have a problem, but be rather ugly:
+
+___Shortcoming 2 Code___:
+```
+    // The problematic variation:
+    for( const S &element: container )
+    {
+        const auto &s= element;
+        fire( s );
+    }
+
+    // how we might use `decltype for concept` to fix it:
+    for( const S &element: container )
+    {
+        const decltype for concept( element ) &s= element;
+        fire( s );
+    }
+```
+
+It should be noted that `decltype for concept( element )` is ill-formed if `element` has no associated
+constraint.  It also should be noted that the variable `s` has the associated constraint which was deduced.
+It is in this manner that we will see the reintroduction of associated constraints -- through various casting
+and concept deduction mechanisms we introduce.  Eventually we'll show how many of them can become implicit
+as well!
+
+Clearly with these two primitives, an equivalent for `auto` in the concept space becomes somewhat desirable
+and possible.  This is somewhat distinct from most constrained `auto` proposals, as we're asking the compiler
+to propagate an unmentioned constraint.  This new keyword we call `auto for concept`, and its usage looks like
+this:
+
+```
+const auto for concept &reference= constrainedVariable;
+```
+
+Given our existing keywords, we can explain this keyword using as-if semantics.  The above usage is the
+same as if we'd written:
+```
+const decltype for concept( constrainedVariable ) &reference= constrainedVariable;
+```
+
+Clearly this permits a better rewrite of the second problem:
+
+___Shortcoming 2 Code___:
+```
+    // The problematic variation:
+    for( const S &element: container )
+    {
+        const auto &s= element;
+        fire( s );
+    }
+
+    // how we might use `decltype for concept` to fix it:
+    for( const S &element: container )
+    {
+        const auto for concept &s= element;
+        fire( s );
+    }
+```
+
+If the `auto for concept` keyword winds up being somewhat easy to type, the above rewrite is pretty close
+to the original intent.  We also suggest that `auto` might be implicitly `auto for concept` in circumstances
+which have associated concept information; however, as `auto for concept` is ill-formed in uses on
+non-constrained right-hand expressions, we point out that the use of `auto for concept` should probably be
+favoured in circumstances where concept preservation is important.  With that noted, some may feel that
+overloading `auto` to be a relaxed form of `auto for concept` without the ill-formed-if-not-constrained
+requirement is potentially misleading.  We are content to leave this point open to committee discussion.
+In either case, we believe that our proposal is self consistent and usable.  This discussion point is merely
+about whether the second problematic variation itself need be problematic.  Some may find this extension of
+`auto` inappropriate.
+
+In all of this introduction of keywords, we've not significantly addressed the third kind of problem.  With
+our current enhancements, let's explore it:
+
+___Shortcoming 3 Code___:
+```
+    // The problematic variation:
+    std::for_each( begin( container ), end( container ),
+            []( const auto &s ){ fire( s ); } );
+
+    // This kind of rewrite would be possible under our solution (which was also a requirement of the
+    // earlier solution):
+    std::for_each( begin( container ), end( container ),
+            []( const Concept &s ){ fire( s ); } );
+
+    // One other possible rewrite can now use `decltype for concept`, which was our mystery keyword
+    // before:
+    std::for_each( begin( container ), end( container ),
+            []( const decltype for concept( container.front() ) &s ){ fire( s ); } );
+
+    // However, this rewrite actually is ill-formed:
+    std::for_each( begin( container ), end( container ),
+            []( const auto for concept &s ){ fire( s ); } );
+```
+
+In the ill-formed case the `auto for concept` keyword has no concept information to use in the `std::for_each`
+function, except potentially any constraints on the `T` type over which the iterators travel... but such a type
+should be unconstrained.  If `std::for_each` were something like `std::transform`, then `auto for concept` would
+deduce `Copyable` for instance, and would probably cause compile failures when functions that are not
+part of the `Copyable` interface are called.  Basically `auto for concept` on a lambda will either deduce
+a potentially more constrained concept than the one used by the function in which the lambda is defined, or it
+will cause a compile failure as `auto for concept` is ill formed when there is no concept data to propagate.
+We also suggest that a Quality of Implementation concern could be to provide compiler warnings for
+unconstrained polymorphic lambdas which are defined in constrained functions.  With all of these points covered,
+this is about as far as we can reclaim the territory of reinventing concept information for lambdas which are
+passed to lower functions.  Either one explicitly specifies the constraint (possibly using
+`decltype for concept`), or one asks for `auto for concept` and is content with a more constrained concept
+or a compile failure.  Pushing the concept information down into the template becomes a major nightmare, as
+discussed in earlier sections.
+
+Returning to the composition of functions case, such as `std::identity`, we see that thus far, we haven't
+delivered on the promise to make that code clean (let alone make it so easy to use that it's invisible).
+
+
+___Shortcoming 1 Code___
+```
+    // The problematic variation:
+    for( const S &s: container ) fire( std::identity( s ) );
+
+    // How we might use `concept_cast` to fix it:
+    for( const S &s: container )
+    {
+        fire( concept_cast< const S & >( std::identity( s ) ) );
+    }
+
+    // Now we might get a bit cute and do this, but it's different code:
+    for( const S &s: container )
+    {
+        const auto for concept &tmp= concept_cast< decltype for concept( s ) >( std::identity( s ) );
+
+        fire( tmp );
+    }
+    
+```
+
+This brings us to the last new keyword and mechanism, concept transformers, or constraint replacers.  The
+(incredibly ugly) keyword we introduce for this is `using this typename< ... > for concept return`.  We'll
+outline a use of it:
+
 
 
 Simple Motivating Example
