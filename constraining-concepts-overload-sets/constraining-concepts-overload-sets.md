@@ -1,10 +1,11 @@
 Constraining Concepts Overload Sets
 ===================================
 
-ISO/IEC JTC1 SC22 WG21 P0782R1
+ISO/IEC JTC1 SC22 WG21 P0782D2
 
     ADAM David Alan Martin  (adam@recursive.engineer)
     Erich Keane             (erich.keane@intel.com)
+    Sean R. Spillane        (sean@spillane.us)
 
 Abstract
 --------
@@ -24,9 +25,262 @@ the author's expectations thereof.  Unfortunately, this oversight cannot be corr
 this later would entail silent behavioral changes to existing code after the release of Concepts in a
 standard.  In other words, this is our only chance to get this right.
 
+First, we'll outline what the committee asked for in improvements and discuss how we might effect those
+results.  Then, we'll explain our much-revised proposal and how it, we believe, solves the problem.
+Later we'll discuss the original proposal from P0782R1, leaving it mostly as it was, including motivations
+and examples, but correcting some errors.  Finally, we'll anticipate common questions and answer them.
+
+Overload Resolution is Insufficient
+-----------------------------------
+
+In Rapperswil, 2018, P0782R1 was discussed, in EWG.  Our simple example regarding a potentially unanticipated
+overload to a function found by ADL was discussed in detail.  As discussed in earlier papers and meetings, our
+problem is not with ADL per-se, but rather with the fact that "constrained functions" are only constrained
+in the sense that callers cannot inappropriately call them, but not that these functions are actually
+constrained in what they may call.  Our proposal attempted to use modifications to the overload resolution
+rules to achieve these ends.  Discussion in committee revealed this to be insufficient in a number of cases.
+
+A simplification of our original example code (without the complete context) is:
+
+```
+namespace AlgorithmLibrary
+{
+    template< ConceptLibrary::Stringable S >
+    void
+    fire( const S &s )
+    {
+        std::cout << s.toString() << std::endl;
+    }
+
+    template< ConceptLibrary::Stringable S >
+    void
+    printAll( const std::vector< S > &container )
+    {
+        // Our original proposal would (with certain assumptions made about the meaning of
+        // `const S &s: container`) not call any free-function `fire` on `s` which was found
+        // by ADL in the namespace for `decltype( s )`, because it wasn't used in the concept
+        // definition.
+        for( const S &s: container ) fire( s );
+    }
+}
+```
+
+The problematic cases discussed in committee can be boiled down to three variations of the core
+of the `printAll` function:
+
+
+__Variation 1__:
+
+```
+    for( const S &s: container ) fire( std::identity( s ) );
+```
+
+__Variation 2__:
+```
+    for( const S &element: container )
+    {
+        const auto &s= element;
+        fire( s );
+    }
+```
+
+__Variation 3__:
+```
+    std::for_each( begin( container ), end( container ),
+            []( const auto &s ){ fire( s ); } );
+```
+
+The problems in our simple overload resolution rules that were exposed by these three refactorings of what
+*should* be equivalent code require that a solution to this problem be much broader than just overload
+resolution.  Each of these three variations appear to be the simplest case of the three shortcomings of
+just modifying overload resolution rules:
+
+__Shortcoming 1__: The concept information does not propagate through composition of function calls, such as
+`f( g( x ) )`.  The `std::identity` function, in the place of `g` clearly highlights this.  It would likely
+be surprising to a programmer if `f( std::identity( x ) )` were completely different to `f( x )`.  In fact,
+it would probably cause `std::identity` to be far less useful than it would be for many circumstances.  This
+transitivity of Concept concerns is present for more than just `std::identity`, but it concisely illustrates
+the case.  In our original proposal, the actual concept information about `decltype( x )` would be lost upon
+evaluation of the expression `std::identity( x )`.  Although the `decltype` is the same, the concept
+information is lost at compiletime; somehow we would have to revive this constraint information..
+
+__Shortcoming 2__: The `auto` problem.  The `auto` keyword performs type deduction but it doesn't necessarily
+propagate the concept information that is available at compiletime into the resulting variable.  This probably
+is simple to remedy, but a simple remedy to this does not account for the use of `auto` in the case of
+a polymorphic lambda.  The problem is that the concept information associated with an expression (in this case
+just a constrained variable) does not necessarily create a likewise constrained variable in the result.  This
+would create another surprising case where a temporary reference to a value which is constrained by a Concept
+has lost its constraint.  A call to `f( localReference )` would not match the results of a call to
+`f( constrainedVariable )` when `auto &localReference= constrainedVariable;`.  This would be equally surprising
+in the language, we feel.  Somehow we have to keep this constraint information alive further.
+
+__Shortcoming 3__: The deep-template-expansion problem.  The use of a polymorphic lambda in a call to an
+STL algorithm will be unable to access the constraint information on its parameter, as the function template
+which calls it is not constrained by any of the concept information known to the caller.  How do we propagate
+the constraint information down into the polymorphic lambda for it to use?  The two typical alternatives,
+build it into the type system, or build a wrapper object for the constrained value are both equally painful
+and unsuitable to use in C++.  Yet the act of refactoring a loop to use a polymorphic lambda and an STL
+algorithm shouldn't potentially cause a major alteration in the semantics of that code.  Somehow we have to
+reintroduce this constraint information further down the call stack.
+
+All three of these shortcomings are interrelated, and the problem requires an integrated solution; however,
+the shortcomings exposed by each of the variants are different aspects of the same problem -- preserving
+concept information in C++ for use in later phases of assigning semantics to expression evaluation.
+
+The Problem of Preserving Concept Metadata at Compiletime
+---------------------------------------------------------
+
+As discussed above, clearly we require a way to preserve the concept information known at compiletime for
+use at various parts of the compilation that are unrelated to the immediate call where overload resolution
+rules performed the right selection.
+
+A common solution employed in many languages would be to introduce some kind of wrapper object which "boxes"
+up a constrained value into a distinct type and preserves this information in the type system by letting the
+box it rides in inform semantics.  This also has the advantage of letting this box act as the discriminator
+to control which overloads of a function or operator actually get called.  In some languages this box might
+be type-erased as to its pure contents, becoming essentially a C++ class with virtual functions.  This is
+probably inappropriate for use in C++ as it sacrifices all knowledge of the underlying type at compiletime,
+thus preventing myriad optimizations.
+
+Alternatively the boxing type could be a distinct wrapper for each underlying type, preserving the true type
+information throughout the compile process.  The downsides of this are well known.  This is what concept maps
+were in C++0x.  We reiterate that we are NOT proposing these.  We merely mention them here to explore the
+possibilities and to remind the reader that we've avoided this route.
+
+A more subtle solution would use the type system a bit differently.  Instead of building the concept information
+into the type being constrained when passing it down to lower function templates, we silently pass it down
+into the lower function's instantiation for use therein, and then we mangle the names of those function
+templates in order to encode the fact that that implementation may differ from any other differently
+constrained instantiation or an unconstrained instantiation.  This seems tenable at first glance, but it tends
+to have some very surprising effects.  Consider the following function template:
+`void add_last_one( T, U );`.  Although we wouldn't be making `T` or `U` into a box, both `T` and `U` were
+`std::list< ... >` and we passed a `U` which was a constrained `std::list< ... >`, wherein, perhaps, the
+`.back` operation is const-only, we start to get into some very problematic territory.  The problem is when
+the `u.back()` operation runs, it will be a different one than `T` gets.  The fact that one is `const`
+may affect the choice of performing move semantics, which may pessimize a function at best, or even give
+different behavior at worst.  Now imagine that this function `add_last_one` is a called by a member function
+of a templated container.  Now that container's entire operation varies based upon constraints to its member
+functions.  Eventually we wind up with multiple implementations of critical member functions which differ
+in the operations they do, which could seriously jeopardize the integrity of the memory layout.  It's almost
+as-if two different type implementations were fighting over the same memory.  This mightn't be a problem
+if memory layout were identical under all variations, but note that `std::vector< bool >` is a totally
+different layout to `std::vector< struct_containing_a_single_bool >`.  Thus we have sort of re-invented the
+concept map, just raised it up to a higher level -- push the concept map out to the broadest instantiated type
+using it.  This also eventually means that deep copy-in and deep copy-out semantics might become necessary as
+the instantiated outer types don't agree on layout, and forcing them to agree can.
+
+Maybe it mightn't be so bad if we could limit the depth of constraint propagation to only a single, or a few
+levels.  However, the same ugly problems of ODR violations and layout battles still await us here -- a
+function instantiated at "limit - 1" could have different behavior than "limit - 2", as the function at "limit"
+now would pass on constraint information one more level and thus change definitions again.  Requiring the
+author to know how deep in a call hierarchy of templates a function is instantiation is a completely unviable
+option.  And trying to make the compiler solve for some stable expansion which doesn't change meaning runs
+into the halting problem.
+
+All of these problems arise from putting constraint information into the type system.  The problem is that
+putting things into the type system is kind of an all-or-nothing proposition -- either information is
+completely embedded therein, or it is completely absent.
+
+Maybe the type system is the wrong place to put this kind of compiletime metadata.
+
+
+Keep It Out of the Type System!
+-------------------------------
+
+What if there were a way to make this kind of interface-like behavior work without touching the type system?
+What kinds of compromises might we have to make?  If it's not in the type system, then where do we put it?
+
+Obviously, the benefit of keeping it out of the type system is to avoid the problems that we outlined in
+our section "The Problem of Preserving Concept Metadata at Compiletime".  However, the problem goes deeper
+than just keeping it out of the type system -- we can't preserve any of it.  If we preserved constraint
+information into deeper template instantiations we'd merely reintroduce the divergent implementations problem
+(ODR issue) and then either try to solve it with name mangling (basically the type system) or by just
+hoping that it's not a big problem (which it certainly will be a big problem for someone!)
+
+Of course losing the concept information is what we were trying to prevent, so how do we preserve type
+information while not preserving it?  We don't!  We instead rely upon reintroducing it at various points
+in expression checking.  Our solution relies upon introducing a few new keywords to the language, with
+some mostly heretofore-unseen semantics and a few implicit applications of those new grammatical productions.
+
+The end result, we believe, is a reasonable compromise position.  The resulting syntax for users wishing
+to preserve constraint information will be nearly the same, if not the same, in most cases.
+
+Before explaining the syntax and introducing the new keywords, we'd like to show the 3 variations of the
+problem again and contrast them with the modified form in our expanded proposal:
+
+__Variation 1__:
+
+```
+    // The problematic variation:
+    for( const S &s: container ) fire( std::identity( s ) );
+
+    // Which under our expanded proposal needn't change at all!
+    for( const S &s: container ) fire( std::identity( s ) );
+
+```
+
+__Variation 2__:
+```
+    // The problematic variation:
+    for( const S &element: container )
+    {
+        const auto &s= element;
+        fire( s );
+    }
+
+    // Which under our expanded proposal might not need to change, depending upon some direction
+    // but in the worst case would become:
+    for( const S &element: container )
+    {
+        const __new_keyword__ &s= element;
+        fire( s );
+    }
+```
+
+__Variation 3__:
+```
+    // The problematic variation:
+    std::for_each( begin( container ), end( container ),
+            []( const auto &s ){ fire( s ); } );
+
+    // This kind of rewrite would be possible under our solution (which was also a requirement of the
+    // earlier solution):
+    std::for_each( begin( container ), end( container ),
+            []( const Concept &s ){ fire( s ); } );
+
+    // Or, another possible rewrite:
+    std::for_each( begin( container ), end( container ),
+            []( const __new_keyword_like_decltype__( container.front() ) &s ){ fire( s ); } );
+```
+
+
+The solution to the third shortcoming is the most disappointing, as preserving the concept through
+`std::for_each` for consumption by `auto` was strongly desired by both the committee and us.  We will justify
+in our conclusions why we're not as disappointed as we might have been, however.
+
+How to Reinvent Lost Concept Constraints
+----------------------------------------
+
+In order to make it easier to understand this new battery of features, we will introduce them in a specific
+order, and build each from earlier primitives, using "as-if" and "almost as-if" explanations of their meanings.
+
+We will start with a new kind of cast, `concept_cast`.  It should be, hopefully, fairly self-evident what
+it does, but this is how we define it:
+
+```
+concept_
+
 
 Simple Motivating Example
 -------------------------
+
+In our original paper, this motivating example was to highlight some potentially unexpected problems with
+ambiguity.  After discussion in Rapperswil, the authors are content to accept that the
+`LoanInterestSerializer` in the following example should probably be considered a poorly written class.
+The major change to the overload resolution rule that this relaxation makes is to consider the entire viable
+set, not just the best match, in determining what overloads in a type which models a concept are suitable
+overload candidates for a specific call site.  This has the advantage of mostly solving the "implicit
+expression variants" problem, such as r-value vs. l-value overloads.
 
 ```
 // Assume a concept, `IntegerSerializer` which requires a member function called `serialize` which
@@ -36,7 +290,7 @@ Simple Motivating Example
 template< typename Instance >
 concept IntegerSerializer= requires( Instance instance, int value )
 {
-    { std::as_const( instance ).serialize( value ) } -> void;
+    { std::as_const( instance ).serialize( value ) } -> std::string;
 }
 
 
@@ -119,11 +373,17 @@ of the correct overload, not to any specific need to have a value in the form of
 An Example at Scale
 -------------------
 
+In this example, distinct namespaces are used to highlight the fact that different pieces of code were written
+by different authors, in different code bases, perhaps at different times.  The `UserProgram` namespace is
+representative of a final application author trying to tie together disparate libraries in C++ and produce
+a coherent, correct result from a program.
+
+
 ```
 namespace ConceptLibrary
 {
     template< typename Instance >
-    concept Stringable= requires( Instance instance, int value )
+    concept Stringable= requires( Instance instance )
     {
         { std::as_const( instance ).toString() } -> std::string;
     }
@@ -282,6 +542,7 @@ What This Paper is  _<b><u>NOT</b></u>_  Proposing
  9. Implicit generation of adaptors
 10. Any form of extra code generation
 11. Any form of extra type generation
+12. Encoding concepts into the type system.
 
 
 Our Proposed Solution
@@ -455,7 +716,7 @@ __A:__ Although this is highly dependent upon the details of an implementation, 
 
 <br>
 
-__Q:__ What about implicit conversions needed in ?
+__Q:__ What about implicit conversions needed in calling a function which is part of a concept?
 
 __A:__ Because the function selected by overload resolution must be part of the operations necessary to
        satisfy the constraints of the specified concept, all implicit conversions which are necessary to
@@ -555,11 +816,33 @@ Jacksonville, on 2018-03-12.  The guidance from the group was strongly positive:
 <p>
 SF: 10 - F: 21 - N: 22 - A: 7 - SA: 1
 
+P0782R1 - Constraining Concepts Overload Sets (A.D.A. Martin, Erich Keane)
+
+The revised paper explains a solution to the specific problem of getting expected overload resolution out of an
+individual function call in a constrained context.  It was presented to EWG during a day session at
+Rapperswil, in 2018.  The guidance from the group was strongly positive to continue to pursue work in this
+direction:
+<p>
+SF: 20 - F: 11 - N: 8 - A: 1 - SA: 1
+<p>
+The group also requested and encouraged investigation into a few things:
+<p>
+Make concepts "viral" through function calls into templates and in `auto` such that some problematic
+examples are corrected:
+<p>
+SF: 10 - F: 10 - N: 8 - A: 1 - SA: 2
+<p>
+Make the overload resolution rule also apply to a fully qualified name, not just members and unqualified
+names:
+<p>
+SF: 11 - F: 12 - N: 6 - A: 0 - SA: 0
+
+
 
 Acknowledgements
 ----------------
 
-The authors would like to thank Allan Deutsch, Hal Finkel, Lisa Lippincott, Gabriel Dos Reis, Sean Spillane,
+The authors would like to thank Allan Deutsch, Hal Finkel, Lisa Lippincott, Gabriel Dos Reis, Justin McHugh,
 Herb Sutter, Faisal Vali, and numerous others for their research, support, input, review, and guidance
 throughout the lifetime of this proposal.  Without their assistance this would not have been possible.
 
@@ -567,3 +850,8 @@ References
 ----------
 
 P0726R0 - "Does Concepts Improve on C++17?"
+P1079R0 - "A minimal solution to the concepts syntax problems"
+P0745R1 - "Concepts in-place syntax"
+P1013R0 - "Explicit concept expressions"
+P1086R0 - "Natural Syntax: Keep It Simple"
+P1084R0 - "Today's return-type-requirements Are Insufficient"
