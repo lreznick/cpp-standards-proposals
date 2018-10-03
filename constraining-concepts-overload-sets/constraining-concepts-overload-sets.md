@@ -1,7 +1,7 @@
 Constraining Concepts Overload Sets
 ===================================
 
-ISO/IEC JTC1 SC22 WG21 P0782R2
+ISO/IEC JTC1 SC22 WG21 P0782D2
 
     ADAM David Alan Martin  (adam@recursive.engineer)
     Erich Keane             (erich.keane@intel.com)
@@ -521,7 +521,6 @@ ___Shortcoming 1 Code___
     // What the above actually expands to, in an almost as-if, fashion.
     for( const S &s: container )
     {
-
         fire( concept_cast< decltype for concept( s ) >( std::identity( s ) ) );
     }
     
@@ -538,6 +537,174 @@ a way to get there sooner?
 Implied Constraint Replacement
 ------------------------------
 
+The problem of asking everyone to stop the world and add constraint replacers seems insurmountable, yet there
+is actually a major path forward here -- we can infer the need for and definitions of constraint replacers
+in many circumstances.
+
+###From Concept Definitions
+
+
+The simplest case to infer a constraint replacer is by looking at the definition of a concept.  Consider:
+
+```
+template< typename T >
+concept Serializable= requires( T instance )
+{
+    { instance.toString() } -> StringLike;
+};
+```
+
+From that concept's definition we can infer that all calls to `.toString()` on anything that is a `Serializable`
+should have an implicit `concept_cast< StringLike & >( instance.toString() )` wrapping them, or more
+specifically, we can imply the existence of `using this typename< StringLike > for concept return` as a
+constraint replacer on the `toString()` function.
+
+###From Class Template Members
+
+Another simple case where we can infer a constraint is on members of templatized classes.  Consider:
+
+```
+template< typename T, std::size_t sz >
+class array
+{
+    private:
+        T stuff[ sz ];
+
+    public:
+        T &operator[] ( const std::size_t idx ) { return stuff[ idx ]; }
+};
+```
+
+Without rewriting this code at all, it is almost certainly safe to imply that
+`array< MyConcept, 42 >::operator[]` has a constraint replacer defined as
+`using this typename< decltype for concept( T ) > for concept return`.  This permits most template libraries
+to automatically work as-if they were designed for this all along.
+
+###From Function Templates Which Explicitly Return Concepts
+
+When new functions will be written that use "natural" syntax for concepts, we will have more constraint
+information available to work with.  Consider a modern max function:
+
+```
+LessThanComparableValue
+max( LessThanComparableValue a, LessThanComparableValue b )
+{
+    return a < b ? a : b;
+}
+```
+
+We should obviously imply the existence of at least
+`using this typename< LessThanComparableValue > for concept return` as a concept returner.
+
+###From Function Template Arguments
+
+Many function templates are probably discriminators or combinators over the same concept.  This means that we
+could probably infer them from the function signatures.  Consider a legacy max function:
+
+
+```
+template< typename T >
+T
+max( T a, T b )
+{
+    return a < b ? a : b;
+}
+```
+
+Without analyzing the function body itself, it is probably safe to assume that
+`using this typename< decltype for concept( a ) | decltype for concept( b ) > for concept return type`
+is a constraint replacer for this function.  We know that both types are the same, and that they likely share
+the same constraint when passed.  Even if they do not, the disjunction mechanism in concepts permits
+accomodating this.  It is worth discussing if the implicit constraint replacer should be suppressed if
+`decltype for concept` of `a` and `b` disagree.  In the single argument case, like `identity`, it probably
+naturally applies.  There is some room for discussion as far as what the correct set of rules for implicit
+constraint replacers on function templates should be; however, we strongly encourage some set of rules as
+it will greatly ease the burden on existing library maintainers.  We see this situation as analagous to
+implicit deduction guides.  We need to pick the right answer, and then the libraries mostly will benefit
+from the implicit guides' correct behavior.
+
+###From Non-Template Function Arguments
+
+Some template functions have non-template overloads that invisibly participate in the same overload set.
+Consider:
+
+```
+int identity( int x ) { return x; }
+```
+
+Asking those functions to explicitly add `using this typename< decltype for concept( x ) > for concept return`
+just to play nicely is going to get annoying.  We should decide whether we want to make this implicit
+requirement apply to just single argument non-template functions or to multiple arguments.  Care needs to be
+taken here in selecting the right level of implicit generation, and some discussion is probably necessary.
+
+There is also the consideration of whether some implicit forms should dominate over non-implicit forms, if
+ever.  We suggest that the constraint replacers that are implicitly generated from concept definitions for
+expressions should always dominate over all other constraint replacers.  We also suggest that explicit
+constraint replacers should dominate over any implicitly generated constraint replacers for all other cases.
+
+We also suggest that a keyword such as `using this typename< delete > for concept return` exist to explicitly
+disable constraint replacers from being implicitly generated for a function.
+
+With these rules and a sensible set of defaults we should be able to make most existing code play well with
+this overload resolution scheme and constraint propagation.  We suggest that while all of these implied
+constraint replacers could be useful, the most useful ones are those deduced from templates and the most
+useful will be those deduced from concept definitions.
+
+Tying the Pieces Together
+-------------------------
+
+Now with all of this new machinery, we can show how each of the three problematic variations becomes
+either much easier or how the problem evaporates entirely.
+
+__Variation 1__:
+
+```
+    for( const S &s: container ) fire( std::identity( s ) );
+    // The above code should just work, assuming either manual insertion of constraint replacers,
+    // or implicit generation of constraint replacers for function templates like `std::identity` 
+```
+
+__Variation 2__:
+```
+    for( const S &element: container )
+    {
+        const auto for concept &s= element;
+        fire( s );
+    }
+    // By using an explicit `auto` created for concepts we get the right behavior.  We also can broaden
+    // the rules on `auto` to permit it to be equivalent to `auto for concept`, for constraint associated
+    // cases.
+
+```
+
+__Variation 3__:
+```
+    std::for_each( begin( container ), end( container ),
+            []( const Concept &s ){ fire( s ); } );
+
+    std::for_each( begin( container ), end( container ),
+            []( const decltype for concept( container.first() ) &s ){ fire( s ); } );
+
+    // This is the only case that really remains hard.  One has to either explicitly name the concept
+    // being passed, or has to deduce it from a local variable which already has the constraint associated
+    // with it.  Both cases require bundling the constraint with the lambda before it is shipped off to
+    // the algorithm for use.
+```
+
+In this world, assuming a compiler which warns on `[]( const auto & )` lambdas created in constrained
+functions, we can mostly program safely, much as we already are used to doing.  However, a few new keywords
+were needed, or existing ones had to learn a few new tricks.  The most disappointing case is that polymorphic
+lambdas being passed into algorithms cannot get the concept constraints shipped onto them; yet, we don't
+see this as too much of a burden.  Although this limitation directly conflicts with the almost-always-auto
+paradigm (which is not a universally accepted paradigm), we suggest that this paradigm is merely a stop
+along the way to better coding styles.  In the past, we always dealt with a concrete type system, as it
+was a safer alternative to completely untyped langauges.  Then we adapted static duck-typing into the
+language such that we wanted to write more generic code without being concerned about specific types, while
+remaining typesafe.  Then we found that there were benefits to the constraints provided by types and we sought
+to constrain our generic code with concepts.  Part of that next phase of evolution is getting rid of broad
+type deduction in favour of constrained type deduction or writing in terms of constrained types.  This trend,
+if followed, will move people away from `[]( const auto & )` style lambdas and towards `[]( const Concept & )`
+style lambdas... which is where our proposal sort of requires us to go already.
 
 
 Simple Motivating Example
