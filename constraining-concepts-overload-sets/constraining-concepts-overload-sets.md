@@ -16,8 +16,8 @@ of invoking a generic function; however, the Concepts design does not deliver on
 implementation of a generic function.  This is because the feature does not constrain the overload set
 of a template-concept function itself.  This is contrary to the expectations of non-experts, because
 to them Concepts should strongly resemble the callable properties of an interface.  This mental model
-drives their expectations to believe that Concepts offer a mechanism to limit the set of operations
-which would be visible from within their constrained function to those which are specified by concept
+drives them to expect that Concepts offer a mechanism to limit the set of operations
+which would be visible from within their constrained function to those which are specified by the concept
 used by the constrained function.
 
 The fact that this is not the case in constrained functions can lead to surprising violations of
